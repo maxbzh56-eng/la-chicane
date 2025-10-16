@@ -1,0 +1,235 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+    volumes:
+      # En développement, monter le code source
+      - .:/app:cached
+      - /app/node_modules
+      - /app/.next
+    networks:
+      - app-network
+    restart: unless-stopped
+    profiles:
+      - production
+
+  # Version pour le développement avec hot reload
+  app-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - SMTP_HOST=mailhog
+      - SMTP_PORT=1025
+      - SMTP_SECURE=false
+      - EMAIL_FROM=noreply@localhost
+    volumes:
+      - .:/app
+      - /app/node_modules
+    networks:
+      - app-network
+    command: npm run dev
+    profiles:
+      - dev
+    depends_on:
+      - mailhog
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    ports:
+      - "1025:1025"  # SMTP port
+      - "8025:8025"  # Web UI port
+    networks:
+      - app-network
+    profiles:
+      - dev
+
+  # Supabase Services
+  supabase-db:
+    image: supabase/postgres:15.1.0.117
+    container_name: supabase-db
+    ports:
+      - "54322:5432"
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - supabase-db-data:/var/lib/postgresql/data
+    networks:
+      - app-network
+    profiles:
+      - dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  supabase-studio:
+    image: supabase/studio:latest
+    container_name: supabase-studio
+    ports:
+      - "54323:3000"
+    environment:
+      SUPABASE_URL: http://supabase-kong:8000
+      SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
+      STUDIO_PG_META_URL: http://supabase-meta:8080
+    depends_on:
+      - supabase-db
+    networks:
+      - app-network
+    profiles:
+      - dev
+
+  supabase-kong:
+    image: kong:2.8.1
+    container_name: supabase-kong
+    ports:
+      - "54321:8000"  # HTTP API
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /var/lib/kong/kong.yml
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl,basic-auth
+    volumes:
+      - ./volumes/api/kong.yml:/var/lib/kong/kong.yml:ro
+    depends_on:
+      - supabase-auth
+      - supabase-rest
+      - supabase-storage
+    networks:
+      - app-network
+    profiles:
+      - dev
+
+  supabase-auth:
+    image: supabase/gotrue:v2.132.3
+    container_name: supabase-auth
+    ports:
+      - "54324:9999"
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: http://localhost:54321
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://postgres:postgres@supabase-db:5432/postgres?search_path=auth
+      GOTRUE_SITE_URL: http://localhost:3000
+      GOTRUE_URI_ALLOW_LIST: http://localhost:3000,http://localhost:3000/*
+      GOTRUE_EXTERNAL_URL: http://localhost:54321
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: 3600
+      GOTRUE_JWT_SECRET: super-secret-jwt-token-with-at-least-32-characters
+      GOTRUE_SMTP_HOST: mailhog
+      GOTRUE_SMTP_PORT: 1025
+      GOTRUE_SMTP_ADMIN_EMAIL: admin@localhost
+      GOTRUE_SMTP_MAX_FREQUENCY: 1s
+      GOTRUE_MAILER_AUTOCONFIRM: false
+      GOTRUE_MAILER_URLPATHS_INVITE: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_CONFIRMATION: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_RECOVERY: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: /auth/v1/verify
+    depends_on:
+      - supabase-db
+      - mailhog
+    networks:
+      - app-network
+    profiles:
+      - dev
+
+  supabase-rest:
+    image: postgrest/postgrest:v11.2.2
+    container_name: supabase-rest
+    environment:
+      PGRST_DB_URI: postgres://postgres:postgres@supabase-db:5432/postgres
+      PGRST_DB_SCHEMAS: public,storage,graphql_public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: super-secret-jwt-token-with-at-least-32-characters
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+    depends_on:
+      - supabase-db
+    networks:
+      - app-network
+    profiles:
+      - dev
+
+  supabase-realtime:
+    image: supabase/realtime:v2.25.35
+    container_name: supabase-realtime
+    environment:
+      DB_HOST: supabase-db
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: postgres
+      DB_SSL: "false"
+      JWT_SECRET: super-secret-jwt-token-with-at-least-32-characters
+      SECURE_CHANNELS: "true"
+      REPLICATION_MODE: RLS
+      REPLICATION_POLL_INTERVAL: 100
+      SUBSCRIPTION_SYNC_INTERVAL: 100
+    depends_on:
+      - supabase-db
+    networks:
+      - app-network
+    profiles:
+      - dev
+
+  supabase-storage:
+    image: supabase/storage-api:v0.43.11
+    container_name: supabase-storage
+    environment:
+      ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
+      SERVICE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
+      AUTH_BEARER_TOKEN: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
+      DATABASE_URL: postgres://postgres:postgres@supabase-db:5432/postgres
+      PGOPTIONS: -c search_path=storage,public
+      FILE_SIZE_LIMIT: 52428800
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: stub
+      REGION: stub
+      GLOBAL_S3_BUCKET: stub
+    volumes:
+      - supabase-storage-data:/var/lib/storage
+    depends_on:
+      - supabase-db
+      - supabase-rest
+    networks:
+      - app-network
+    profiles:
+      - dev
+
+  supabase-meta:
+    image: supabase/postgres-meta:v0.75.0
+    container_name: supabase-meta
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: supabase-db
+      PG_META_DB_PORT: 5432
+      PG_META_DB_NAME: postgres
+      PG_META_DB_USER: postgres
+      PG_META_DB_PASSWORD: postgres
+    depends_on:
+      - supabase-db
+    networks:
+      - app-network
+    profiles:
+      - dev
+
+volumes:
+  supabase-db-data:
+  supabase-storage-data:
+
+networks:
+  app-network:
+    driver: bridge

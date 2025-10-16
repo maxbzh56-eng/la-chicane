@@ -1,0 +1,22 @@
+# Dockerfile pour le développement avec hot reload
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Installer les dépendances système nécessaires
+RUN apk add --no-cache libc6-compat
+
+# Copier les fichiers de dépendances
+COPY package.json package-lock.json* ./
+
+# Installer les dépendances
+RUN npm ci || npm install
+
+# Le code source sera monté via docker-compose volumes
+
+EXPOSE 3000
+
+ENV NODE_ENV=development
+ENV NEXT_TELEMETRY_DISABLED=1
+
+CMD ["npm", "run", "dev"]
